@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ivahaev/amigo/uuid"
+	"github.com/aerosales10/amigo/uuid"
 )
 
 const (
@@ -39,14 +39,15 @@ type amiAdapter struct {
 	actionTimeout time.Duration
 	dialTimeout   time.Duration
 
-	actionsChan   chan map[string]string
-	responseChans map[string]chan map[string]string
-	pingerChan    chan struct{}
-	mutex         *sync.RWMutex
-	emitEvent     func(string, string)
+	actionsChan    chan map[string]string
+	responseChans  map[string]chan map[string]string
+	pingerChan     chan struct{}
+	disconnectChan chan bool
+	mutex          *sync.RWMutex
+	emitEvent      func(string, string)
 }
 
-func newAMIAdapter(s *Settings, eventEmitter func(string, string)) (*amiAdapter, error) {
+func newAMIAdapter(s *Settings, eventEmitter func(string, string)) *amiAdapter {
 	var a = new(amiAdapter)
 	a.dialString = fmt.Sprintf("%s:%s", s.Host, s.Port)
 	a.username = s.Username
@@ -60,76 +61,93 @@ func newAMIAdapter(s *Settings, eventEmitter func(string, string)) (*amiAdapter,
 	a.responseChans = make(map[string]chan map[string]string)
 	a.eventsChan = make(chan map[string]string, 4096)
 	a.pingerChan = make(chan struct{})
+	a.disconnectChan = make(chan bool)
 
-	go func() {
-		for {
-			func() {
-				a.id = nextID()
-				var err error
-				var conn net.Conn
-				readErrChan := make(chan error)
-				writeErrChan := make(chan error)
-				pingErrChan := make(chan error)
-				chanStop := make(chan struct{})
-				for {
-					conn, err = a.openConnection()
-					if err == nil {
-						defer conn.Close()
-						greetings := make([]byte, 100)
-						n, err := conn.Read(greetings)
-						if err != nil {
-							go a.emitEvent("error", fmt.Sprintf("Asterisk connection error: %s", err.Error()))
-							time.Sleep(s.ReconnectInterval)
-							return
-						}
+	return a
+}
 
-						err = a.login(conn)
-						if err != nil {
-							go a.emitEvent("error", fmt.Sprintf("Asterisk login error: %s", err.Error()))
-							time.Sleep(s.ReconnectInterval)
-							return
-						}
+func (a *amiAdapter) disconnect() {
+	a.disconnectChan <- true
+	close(a.disconnectChan)
+}
 
-						if n > 2 {
-							greetings = greetings[:n-2]
-						}
-
-						go a.emitEvent("connect", string(greetings))
-						break
-					}
-
-					a.emitEvent("error", "AMI Reconnect failed")
-					time.Sleep(s.ReconnectInterval)
-					return
+func (a *amiAdapter) connect(reconnectInterval time.Duration, keepalive bool) {
+	var conn net.Conn
+	defer conn.Close()
+BREAKLOOP:
+	for {
+		readErrChan := make(chan error)
+		writeErrChan := make(chan error)
+		pingErrChan := make(chan error)
+		chanStop := make(chan struct{})
+		select {
+		case err := <-readErrChan:
+			close(chanStop)
+			a.mutex.Lock()
+			a.connected = false
+			a.mutex.Unlock()
+			go a.emitEvent("error", fmt.Sprintf("AMI TCP ERROR: %s", err.Error()))
+		case err := <-writeErrChan:
+			close(chanStop)
+			a.mutex.Lock()
+			a.connected = false
+			a.mutex.Unlock()
+			go a.emitEvent("error", fmt.Sprintf("AMI TCP ERROR: %s", err.Error()))
+		case err := <-pingErrChan:
+			close(chanStop)
+			a.mutex.Lock()
+			a.connected = false
+			a.mutex.Unlock()
+			go a.emitEvent("error", fmt.Sprintf("AMI TCP ERROR: %s", err.Error()))
+		case <-a.disconnectChan:
+			break BREAKLOOP
+		default:
+			a.mutex.RLock()
+			connected := a.connected
+			a.mutex.RUnlock()
+			if connected {
+				time.Sleep(time.Second * 1)
+				continue BREAKLOOP
+			}
+			c, err := a.openConnection()
+			if err == nil {
+				greetings := make([]byte, 100)
+				n, err := c.Read(greetings)
+				if err != nil {
+					go a.emitEvent("error", fmt.Sprintf("Asterisk connection error: %s", err.Error()))
+					time.Sleep(reconnectInterval)
+					continue BREAKLOOP
 				}
 
+				err = a.login(c)
+				if err != nil {
+					go a.emitEvent("error", fmt.Sprintf("Asterisk login error: %s", err.Error()))
+					time.Sleep(reconnectInterval)
+					continue BREAKLOOP
+				}
+
+				if n > 2 {
+					greetings = greetings[:n-2]
+				}
+				a.emitEvent("connect", string(greetings))
 				a.mutex.Lock()
 				a.connected = true
 				a.mutex.Unlock()
+				conn.Close()
+				conn = c
 				go a.reader(conn, chanStop, readErrChan)
 				go a.writer(conn, chanStop, writeErrChan)
-				if s.Keepalive {
+				if keepalive {
 					go a.pinger(chanStop, pingErrChan)
 				}
-
-				select {
-				case err = <-readErrChan:
-				case err = <-writeErrChan:
-				case err = <-pingErrChan:
-				}
-
-				close(chanStop)
-				a.mutex.Lock()
-				a.connected = false
-				a.mutex.Unlock()
-
-				go a.emitEvent("error", fmt.Sprintf("AMI TCP ERROR: %s", err.Error()))
-				time.Sleep(s.ReconnectInterval)
-			}()
+			} else {
+				a.emitEvent("error", "AMI Reconnect failed")
+				time.Sleep(reconnectInterval)
+				continue BREAKLOOP
+			}
 		}
-	}()
+	}
 
-	return a, nil
 }
 
 func nextID() string {

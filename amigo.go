@@ -2,16 +2,15 @@ package amigo
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ivahaev/amigo/uuid"
+	"github.com/aerosales10/amigo/uuid"
 )
 
 var (
-	version = "0.1.9"
+	version = "0.1.10"
 
 	// TODO: implement function to clear old data in handlers.
 	agiCommandsHandlers = make(map[string]agiCommand)
@@ -155,18 +154,11 @@ func (a *Amigo) Connect() {
 	a.connectCalled = true
 	a.mutex.Unlock()
 
-	for {
-		am, err := newAMIAdapter(a.settings, a.emitEvent)
-		if err != nil {
-			go a.emitEvent("error", fmt.Sprintf("AMI Connect error: %s", err.Error()))
-		} else {
-			a.mutex.Lock()
-			a.ami = am
-			a.mutex.Unlock()
-			break
-		}
-		time.Sleep(time.Second)
-	}
+	am := newAMIAdapter(a.settings, a.emitEvent)
+	go am.connect(a.settings.ReconnectInterval, a.settings.Keepalive)
+	a.mutex.Lock()
+	a.ami = am
+	a.mutex.Unlock()
 
 	go func() {
 		for {
@@ -223,6 +215,11 @@ func (a *Amigo) Connect() {
 			a.handlerMutex.RUnlock()
 		}
 	}()
+}
+
+// Disconnect ...
+func (a *Amigo) Disconnect() {
+	a.ami.disconnect()
 }
 
 // Connected returns true if successfully connected and logged in Asterisk and false otherwise.
