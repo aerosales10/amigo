@@ -73,7 +73,6 @@ func (a *amiAdapter) disconnect() {
 
 func (a *amiAdapter) connect(reconnectInterval time.Duration, keepalive bool) {
 	var conn net.Conn
-	defer conn.Close()
 BREAKLOOP:
 	for {
 		readErrChan := make(chan error)
@@ -133,8 +132,11 @@ BREAKLOOP:
 				a.mutex.Lock()
 				a.connected = true
 				a.mutex.Unlock()
-				conn.Close()
+				if conn != nil {
+					conn.Close()
+				}
 				conn = c
+				defer conn.Close()
 				go a.reader(conn, chanStop, readErrChan)
 				go a.writer(conn, chanStop, writeErrChan)
 				if keepalive {
