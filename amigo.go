@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	version = "0.1.11"
+	version = "0.1.12"
 
 	// TODO: implement function to clear old data in handlers.
 	agiCommandsHandlers = make(map[string]agiCommand)
@@ -87,9 +87,9 @@ func (a *Amigo) Action(action map[string]string) (map[string]string, error) {
 		return nil, errNotConnected
 	}
 
+	result := a.ami.exec(action)
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
-	result := a.ami.exec(action)
 	if a.capitalizeProps {
 		e := map[string]string{}
 		for k, v := range result {
